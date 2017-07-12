@@ -1196,7 +1196,7 @@ struct xdma_transfer *engine_transfer_completion(struct xdma_engine *engine,
     } else {
         /* synchronous I/O? */
         /* awake task on transfer's wait queue */
-        wake_up_interruptible(&transfer->wq);
+        wake_up(&transfer->wq);
     }
 
     return transfer;
@@ -3230,7 +3230,7 @@ static loff_t char_sgdma_llseek(struct file *file, loff_t off, int whence)
 static int transfer_monitor(struct xdma_engine *engine, struct xdma_transfer *transfer)
 {
     u32 desc_count;
-    int rc;
+    int rc = 0;
 
     /*
      * When polling, determine how many descriptors have been queued
@@ -3248,9 +3248,14 @@ static int transfer_monitor(struct xdma_engine *engine, struct xdma_transfer *tr
         dbg_tfr("engine_service_poll()=%d\n", rc);
     } else {
         /* the function servicing the engine will wake us */
-        rc = wait_event_interruptible(transfer->wq, transfer->state != TRANSFER_STATE_SUBMITTED);
-        if (rc) {
+        rc = wait_event_timeout(transfer->wq, transfer->state != TRANSFER_STATE_SUBMITTED,
+                (POLL_TIMEOUT_SECONDS * HZ));
+        if (rc == 0) {
+            /* transfer timedout */
             dbg_tfr("wait_event_interruptible=%d\n", rc);
+            rc = -ETIMEDOUT;
+        } else {
+            rc = 0;
         }
     }
 
@@ -3312,7 +3317,6 @@ static ssize_t transfer_data(struct xdma_engine *engine, char *transfer_addr,
                 res = -EIO;
             }
             dbg_tfr("transfer %p completed\n", transfer);
-            transfer_destroy(lro, transfer);
             /* interrupted by a signal / polling detected error */
         } else if (rc != 0) {
             /* transfer can still be in-flight */
@@ -3321,6 +3325,7 @@ static ssize_t transfer_data(struct xdma_engine *engine, char *transfer_addr,
 
             res = -ERESTARTSYS;
         }
+        transfer_destroy(lro, transfer);
 
         /* If an error has occurred, clear counts tracking progress */
         if (res != 0) {
